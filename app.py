@@ -73,13 +73,59 @@ def load_data():
     )
     return df
 
+def train_and_save_models():
+    """Train models if they don't exist — runs automatically on first deploy."""
+    from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+    from sklearn.model_selection import train_test_split, cross_val_score
+    from sklearn.preprocessing import LabelEncoder
+    from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+    import os
+    os.makedirs("models", exist_ok=True)
+    df_t = pd.read_csv("data/human_decision_fatigue_dataset.csv")
+    time_order = {"Morning":0,"Afternoon":1,"Evening":2,"Night":3}
+    df_t["Time_of_Day_Enc"]    = df_t["Time_of_Day"].map(time_order).fillna(1)
+    df_t["Sleep_Deficit"]      = np.maximum(0, 7 - df_t["Sleep_Hours_Last_Night"])
+    df_t["Decision_Density"]   = df_t["Decisions_Made"] / (df_t["Hours_Awake"] + 1e-6)
+    df_t["Cognitive_Pressure"] = df_t["Stress_Level_1_10"] * df_t["Cognitive_Load_Score"]
+    df_t["Fatigue_Risk_Index"] = df_t["Hours_Awake"]*0.3 + df_t["Sleep_Deficit"]*0.4 + df_t["Error_Rate"]*50 + df_t["Stress_Level_1_10"]*0.3
+    FEAT = ["Hours_Awake","Decisions_Made","Task_Switches","Avg_Decision_Time_sec","Sleep_Hours_Last_Night","Time_of_Day_Enc","Caffeine_Intake_Cups","Stress_Level_1_10","Error_Rate","Cognitive_Load_Score","Sleep_Deficit","Decision_Density","Cognitive_Pressure","Fatigue_Risk_Index"]
+    X = df_t[FEAT]
+    le = LabelEncoder(); le.fit(["Low","Moderate","High"])
+    yc = le.transform(df_t["Fatigue_Level"]); yr = df_t["Decision_Fatigue_Score"]
+    X_tr, X_te, yc_tr, yc_te, yr_tr, yr_te = train_test_split(X, yc, yr, test_size=0.2, random_state=42, stratify=yc)
+    clf = RandomForestClassifier(n_estimators=200, max_depth=12, min_samples_split=5, min_samples_leaf=2, class_weight="balanced", random_state=42, n_jobs=-1)
+    clf.fit(X_tr, yc_tr)
+    reg = RandomForestRegressor(n_estimators=200, max_depth=12, min_samples_split=5, min_samples_leaf=2, random_state=42, n_jobs=-1)
+    reg.fit(X_tr, yr_tr)
+    acc = (clf.predict(X_te)==yc_te).mean()
+    cv  = cross_val_score(clf, X, yc, cv=5, scoring="accuracy", n_jobs=-1)
+    yr_p = reg.predict(X_te)
+    fi  = sorted(zip(FEAT, clf.feature_importances_), key=lambda x: -x[1])
+    metrics = {"clf_accuracy":round(acc,4),"clf_cv_mean":round(cv.mean(),4),"clf_cv_std":round(cv.std(),4),"reg_r2":round(r2_score(yr_te,yr_p),4),"reg_rmse":round(np.sqrt(mean_squared_error(yr_te,yr_p)),4),"reg_mae":round(mean_absolute_error(yr_te,yr_p),4),"n_train":len(X_tr),"n_test":len(X_te),"features":FEAT,"feature_importance":[[f,round(i,6)] for f,i in fi]}
+    joblib.dump(clf, "models/clf_fatigue_level.pkl")
+    joblib.dump(reg, "models/reg_fatigue_score.pkl")
+    joblib.dump(le,  "models/label_encoder.pkl")
+    import json
+    with open("models/metrics.json","w") as f: json.dump(metrics,f,indent=2)
+
 @st.cache_resource
 def load_models():
-    clf  = joblib.load("models/clf_fatigue_level.pkl")
-    reg  = joblib.load("models/reg_fatigue_score.pkl")
-    le   = joblib.load("models/label_encoder.pkl")
-    with open("models/metrics.json") as f:
-        metrics = json.load(f)
+    import os
+    os.makedirs("models", exist_ok=True)
+    try:
+        clf  = joblib.load("models/clf_fatigue_level.pkl")
+        reg  = joblib.load("models/reg_fatigue_score.pkl")
+        le   = joblib.load("models/label_encoder.pkl")
+        with open("models/metrics.json") as f:
+            metrics = json.load(f)
+    except (FileNotFoundError, EOFError):
+        with st.spinner("Training models on first run — this takes about 30 seconds..."):
+            train_and_save_models()
+        clf  = joblib.load("models/clf_fatigue_level.pkl")
+        reg  = joblib.load("models/reg_fatigue_score.pkl")
+        le   = joblib.load("models/label_encoder.pkl")
+        with open("models/metrics.json") as f:
+            metrics = json.load(f)
     return clf, reg, le, metrics
 
 df            = load_data()
